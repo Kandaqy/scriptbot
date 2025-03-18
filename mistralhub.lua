@@ -516,6 +516,7 @@ local function createMainUI()
         { Name = "Auto-aim",      URL = "https://raw.githubusercontent.com/Kandaqy/scriptbot/refs/heads/main/autoaim.lua" },
         { Name = "Possessor",     URL = "https://raw.githubusercontent.com/Kandaqy/scriptbot/refs/heads/main/possessor.lua" },
         { Name = "Re-open Chat",  URL = "https://raw.githubusercontent.com/Kandaqy/scriptbot/refs/heads/main/reopen-chat.lua" },
+        { Name = "Shader",  URL = "https://raw.githubusercontent.com/randomstring0/pshade-ultimate/refs/heads/main/src/cd.lua" },
         -- Add more here if desired
     }
 
