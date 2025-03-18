@@ -517,6 +517,7 @@ local function createMainUI()
         { Name = "Possessor",     URL = "https://raw.githubusercontent.com/Kandaqy/scriptbot/refs/heads/main/possessor.lua" },
         { Name = "Re-open Chat",  URL = "https://raw.githubusercontent.com/Kandaqy/scriptbot/refs/heads/main/reopen-chat.lua" },
         { Name = "Shader",  URL = "https://raw.githubusercontent.com/randomstring0/pshade-ultimate/refs/heads/main/src/cd.lua" },
+        { Name = "Mirror",  URL = "https://raw.githubusercontent.com/Kandaqy/scriptbot/refs/heads/main/mirror.lua" },
         -- Add more here if desired
     }
 
