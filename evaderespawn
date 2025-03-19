@@ -1,0 +1,166 @@
+local Players = game:GetService("Players")
+local VirtualUser = game:GetService("VirtualUser")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+
+local player = Players.LocalPlayer
+local lastSafePosition = nil
+local downedPosition = nil
+local teleportDelay = 0.5 -- Default value
+
+-- Create UI
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "RespawnUI"
+screenGui.Parent = player:WaitForChild("PlayerGui")
+
+local mainFrame = Instance.new("Frame")
+mainFrame.Size = UDim2.new(0, 200, 0, 120)
+mainFrame.Position = UDim2.new(0.5, -100, 0.5, -60)
+mainFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+mainFrame.Active = true
+mainFrame.Draggable = true
+mainFrame.Parent = screenGui
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, 0, 0, 30)
+title.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+title.Text = "Auto Respawn Settings"
+title.TextColor3 = Color3.new(1, 1, 1)
+title.Parent = mainFrame
+
+local delayContainer = Instance.new("Frame")
+delayContainer.Size = UDim2.new(1, -20, 0, 40)
+delayContainer.Position = UDim2.new(0, 10, 0, 40)
+delayContainer.BackgroundTransparency = 1
+delayContainer.Parent = mainFrame
+
+local delayLabel = Instance.new("TextLabel")
+delayLabel.Size = UDim2.new(0.5, 0, 1, 0)
+delayLabel.Text = "Teleport Delay:"
+delayLabel.TextColor3 = Color3.new(1, 1, 1)
+delayLabel.TextXAlignment = Enum.TextXAlignment.Left
+delayLabel.BackgroundTransparency = 1
+delayLabel.Parent = delayContainer
+
+local delayBox = Instance.new("TextBox")
+delayBox.Size = UDim2.new(0.4, 0, 0.6, 0)
+delayBox.Position = UDim2.new(0.5, 0, 0.2, 0)
+delayBox.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+delayBox.TextColor3 = Color3.new(1, 1, 1)
+delayBox.Text = tostring(teleportDelay)
+delayBox.Parent = delayContainer
+
+local buttonContainer = Instance.new("Frame")
+buttonContainer.Size = UDim2.new(1, -20, 0, 30)
+buttonContainer.Position = UDim2.new(0, 10, 0, 90)
+buttonContainer.BackgroundTransparency = 1
+buttonContainer.Parent = mainFrame
+
+local function createButton(text, position, callback)
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(0.45, 0, 1, 0)
+    button.Position = position
+    button.Text = text
+    button.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+    button.TextColor3 = Color3.new(1, 1, 1)
+    button.Parent = buttonContainer
+    
+    button.MouseButton1Click:Connect(callback)
+    return button
+end
+
+-- UI Functions
+local function updateDelayDisplay()
+    delayBox.Text = string.format("%.3f", teleportDelay)
+end
+
+local function validateDelay()
+    local num = tonumber(delayBox.Text)
+    if num and num >= 0 then
+        teleportDelay = num
+    else
+        teleportDelay = 0.5
+    end
+    updateDelayDisplay()
+end
+
+delayBox.FocusLost:Connect(validateDelay)
+
+createButton("-", UDim2.new(0, 0, 0, 0), function()
+    teleportDelay = math.max(0, teleportDelay - 0.1)
+    updateDelayDisplay()
+end)
+
+createButton("+", UDim2.new(0.55, 0, 0, 0), function()
+    teleportDelay = teleportDelay + 0.1
+    updateDelayDisplay()
+end)
+
+-- Make UI slightly transparent when not hovered
+mainFrame.MouseEnter:Connect(function()
+    mainFrame.BackgroundTransparency = 0
+end)
+
+mainFrame.MouseLeave:Connect(function()
+    mainFrame.BackgroundTransparency = 0.3
+end)
+
+-- Anti-AFK
+player.Idled:Connect(function()
+    VirtualUser:CaptureController()
+    VirtualUser:ClickButton2(Vector2.new())
+end)
+
+-- Continuous position recorder
+coroutine.wrap(function()
+    while true do
+        local character = player.Character
+        if character then
+            local hrp = character:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                if not character:GetAttribute("Downed") then
+                    lastSafePosition = hrp.CFrame
+                else
+                    downedPosition = hrp.CFrame
+                end
+            end
+        end
+        task.wait(0.1)
+    end
+end)()
+
+-- E key handler
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if input.KeyCode == Enum.KeyCode.E and not gameProcessed then
+        local character = player.Character
+        if character and character:GetAttribute("Downed") then
+            local targetPosition = lastSafePosition or downedPosition
+            
+            if targetPosition then
+                ReplicatedStorage.Events.Player.ChangePlayerMode:FireServer(true)
+                local oldCharacter = character
+                repeat task.wait() until player.Character ~= oldCharacter
+                
+                local newCharacter = player.Character
+                if newCharacter then
+                    local newHrp = newCharacter:WaitForChild("HumanoidRootPart")
+                    
+                    -- Apply user-configured delay
+                    task.wait(teleportDelay)
+                    newHrp.CFrame = targetPosition
+                    
+                    -- Secondary teleport to ensure position
+                    task.wait(0.2)
+                    newHrp.CFrame = targetPosition
+                    
+                    game.StarterGui:SetCore("SendNotification", {
+                        Title = "Teleported Back",
+                        Text = string.format("Delay: %.1fs", teleportDelay),
+                        Duration = 2
+                    })
+                end
+            end
+        end
+    end
+end)
