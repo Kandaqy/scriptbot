@@ -518,7 +518,7 @@ local function createMainUI()
         { Name = "Re-open Chat",  URL = "https://raw.githubusercontent.com/Kandaqy/scriptbot/refs/heads/main/reopen-chat.lua" },
         { Name = "Shader",  URL = "https://raw.githubusercontent.com/randomstring0/pshade-ultimate/refs/heads/main/src/cd.lua" },
         { Name = "Mirror",  URL = "https://raw.githubusercontent.com/Kandaqy/scriptbot/refs/heads/main/mirror.lua" },
-        { Name = "Mirror",  URL = "https://raw.githubusercontent.com/Kandaqy/scriptbot/refs/heads/main/evaderespawn" },
+        { Name = "Evade",  URL = "https://raw.githubusercontent.com/Kandaqy/scriptbot/refs/heads/main/evaderespawn" },
         -- Add more here if desired
     }
 
