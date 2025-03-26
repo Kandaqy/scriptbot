@@ -1,0 +1,489 @@
+--[[
+    Script: Intelligent Flick & Aim-Lock Assist (Auto-LMB Hold) v1.4
+    Description: Finds nearest valid enemy (Torso prioritized, Head fallback), flicks instantly on 'E',
+                 then enters an aim-lock phase. During lock, it tracks the target part and only
+                 presses/holds LMB when the aim is stable and likely to hit. Releases LMB
+                 when aim becomes unstable or lock duration ends. Includes Team Check. Optimized.
+    Trigger: Press 'E'. Target selected beforehand.
+    UI Toggle: Press 'H'.
+    LMB Simulation: Uses mouse1press() and mouse1release(). Falls back to VirtualUser.
+    Aim Logic: Prioritizes Torso, checks visibility, locks onto visible part, shoots when stable.
+]]
+
+-- // Services \\ --
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local CoreGui = game:GetService("CoreGui")
+local VirtualUser -- Optional fallback service
+
+-- // Optimized Service/Function Access \\ --
+local task_wait = task.wait
+local task_delay = task.delay
+local task_spawn = task.spawn
+local Vector2_new = Vector2.new
+local CFrame_lookAt = CFrame.lookAt
+local Enum_KeyCode = Enum.KeyCode
+local Enum_MouseBehavior = Enum.MouseBehavior
+local Enum_CameraType = Enum.CameraType
+local Enum_ThumbnailType = Enum.ThumbnailType
+local Enum_ThumbnailSize = Enum.ThumbnailSize
+local Enum_RaycastFilterType = Enum.RaycastFilterType
+local math_huge = math.huge
+local math_acos = math.acos
+local math_clamp = math.clamp
+local math_rad = math.rad
+local ipairs = ipairs
+local pairs = pairs
+local pcall = pcall
+local typeof = typeof
+local string_format = string.format
+local table_insert = table.insert
+local table_move = table.move
+
+-- Attempt to get VirtualUser for fallback click
+pcall(function() VirtualUser = game:GetService("VirtualUser") end)
+
+-- // Local Player & Camera \\ --
+local LocalPlayer = Players.LocalPlayer
+local Camera = Workspace.CurrentCamera
+
+-- // Configuration \\ --
+local Config = {
+    TeamCheck = true,                   -- Set to false to target teammates as well
+    AimFOV = 70,                        -- FOV used when aiming/flicking
+    MaxTargetDistance = 1500,           -- Max range for finding/checking targets
+    TriggerKey = Enum_KeyCode.E,        -- Key to trigger the flick and shoot
+    ToggleUiKey = Enum_KeyCode.H,       -- UI Toggle key
+    TargetScanInterval = 0.1,           -- How often to scan for targets (seconds).
+    AimLockDuration = 0.25,             -- <<< Max duration to actively aim-lock (seconds)
+    AimStabilityThreshold = math_rad(1.5), -- <<< Max angle difference (radians) to be considered 'stable' for shooting
+    PostAimLockRestoreDelay = 0.03,     -- Delay after releasing LMB before restoring camera
+}
+
+-- // State Variables \\ --
+local currentTargetPlayer = nil
+local currentTargetPartName = nil -- "UpperTorso", "Torso", or "Head"
+local savedFOV = Camera.FieldOfView
+local originalMouseBehavior = UserInputService.MouseBehavior
+local originalCameraType = Camera.CameraType
+local originalCameraFocus = Camera.Focus
+local isAiming = false -- Master flag for the entire flick+lock process
+local uiEnabled = true
+local lastTargetScanTime = 0
+local isMousePressedByScript = false -- Track if the script is holding the mouse down
+
+-- // UI Elements (Optimized Checks - Same as v1.3) \\ --
+local ConfirmGui = CoreGui:FindFirstChild("ConfirmTargetGui") or Instance.new("ScreenGui", CoreGui)
+if ConfirmGui.Name ~= "ConfirmTargetGui" then ConfirmGui.Name = "ConfirmTargetGui" end
+ConfirmGui.ResetOnSpawn = false; ConfirmGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling; ConfirmGui.DisplayOrder = 1000
+local MainFrame = ConfirmGui:FindFirstChild("MainFrame") or Instance.new("Frame", ConfirmGui)
+if MainFrame.Name ~= "MainFrame" then MainFrame.Name = "MainFrame" end
+MainFrame.AnchorPoint = Vector2_new(1, 1); MainFrame.Position = UDim2.new(1, -10, 1, -10); MainFrame.Size = UDim2.new(0, 150, 0, 180)
+MainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20); MainFrame.BackgroundTransparency = 0.2; MainFrame.BorderSizePixel = 1
+MainFrame.BorderColor3 = Color3.fromRGB(190, 190, 190); MainFrame.Visible = false
+local PlayerIcon = MainFrame:FindFirstChild("PlayerIcon") or Instance.new("ImageLabel", MainFrame)
+if PlayerIcon.Name ~= "PlayerIcon" then PlayerIcon.Name = "PlayerIcon" end
+PlayerIcon.Size = UDim2.new(0, 100, 0, 100); PlayerIcon.Position = UDim2.new(0.5, 0, 0, 15); PlayerIcon.AnchorPoint = Vector2_new(0.5, 0)
+PlayerIcon.BackgroundTransparency = 1; PlayerIcon.ScaleType = Enum.ScaleType.Fit; PlayerIcon.Image = ""
+local PlayerNameLabel = MainFrame:FindFirstChild("PlayerNameLabel") or Instance.new("TextLabel", MainFrame)
+if PlayerNameLabel.Name ~= "PlayerNameLabel" then PlayerNameLabel.Name = "PlayerNameLabel" end
+PlayerNameLabel.Size = UDim2.new(1, -20, 0, 20); PlayerNameLabel.Position = UDim2.new(0.5, 0, 0, 120); PlayerNameLabel.AnchorPoint = Vector2_new(0.5, 0)
+PlayerNameLabel.BackgroundTransparency = 1; PlayerNameLabel.TextColor3 = Color3.fromRGB(255, 255, 255); PlayerNameLabel.TextSize = 14
+PlayerNameLabel.Font = Enum.Font.SourceSansSemibold; PlayerNameLabel.Text = "No Target"; PlayerNameLabel.TextXAlignment = Enum.TextXAlignment.Center
+local ConfirmText = MainFrame:FindFirstChild("ConfirmText") or Instance.new("TextLabel", MainFrame)
+if ConfirmText.Name ~= "ConfirmText" then ConfirmText.Name = "ConfirmText" end
+ConfirmText.Size = UDim2.new(1, -20, 0, 30); ConfirmText.Position = UDim2.new(0.5, 0, 1, -35); ConfirmText.AnchorPoint = Vector2_new(0.5, 0)
+ConfirmText.BackgroundTransparency = 1; ConfirmText.TextColor3 = Color3.fromRGB(200, 200, 200); ConfirmText.TextSize = 12
+ConfirmText.Font = Enum.Font.SourceSans; ConfirmText.TextWrapped = true; ConfirmText.Text = string_format('Confirm by clicking "%s"', Config.TriggerKey.Name)
+ConfirmText.TextXAlignment = Enum.TextXAlignment.Center
+
+-- // Pre-create RaycastParams for reuse \\ --
+local baseIgnoreList = {Camera, ConfirmGui}
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum_RaycastFilterType.Exclude
+rayParams.IgnoreWater = true
+
+-- // Functions \\ --
+
+-- Internal visibility check for a specific part
+local function isPartVisible(targetPlayer, targetPart, originOverride)
+    local localChar = LocalPlayer.Character
+    if not targetPart or not localChar then return false, nil end -- Part must exist
+
+    local origin = originOverride or Camera.CFrame.Position
+    local targetPosition = targetPart.Position
+    local direction = (targetPosition - origin)
+    local distance = direction.Magnitude
+
+    if distance < 0.1 or distance > Config.MaxTargetDistance then return false, nil end
+
+    -- Build ignore list dynamically (more robust)
+    local ignoreList = {localChar}
+    if targetPlayer and targetPlayer.Character then table_insert(ignoreList, targetPlayer.Character) end -- Ignore whole characters
+    table_move(baseIgnoreList, 1, #baseIgnoreList, #ignoreList + 1, ignoreList) -- Add base ignores
+
+    rayParams.FilterDescendantsInstances = ignoreList
+    local raycastResult = Workspace:Raycast(origin, direction.Unit * distance, rayParams)
+
+    if raycastResult then
+        -- Hit something. If it's NOT a descendant of the target character, it's blocked.
+        if targetPlayer and targetPlayer.Character and not raycastResult.Instance:IsDescendantOf(targetPlayer.Character) then
+            return false, nil -- Blocked by something else
+        elseif not targetPlayer or not targetPlayer.Character then
+             -- If target isn't a player character, any hit means blocked? Or maybe allow hitting self? Let's assume blocked.
+             return false, nil
+        end
+         -- Hit target or its non-colliding parts, assume visible for this check
+         return true, targetPosition
+    else
+        return true, targetPosition -- Visible
+    end
+end
+
+-- Checks Torso (Upper/Lower R15, Torso R6) then Head for visibility
+local function getVisibleTargetPart(targetPlayer, originOverride)
+    local targetChar = targetPlayer and targetPlayer.Character
+    if not targetChar then return false, nil, nil end
+
+    local primaryPartName = "UpperTorso" -- R15 Default
+    local primaryPart = targetChar:FindFirstChild(primaryPartName)
+    if not primaryPart then -- Try R6 Torso
+        primaryPartName = "Torso"
+        primaryPart = targetChar:FindFirstChild(primaryPartName)
+    end
+    -- Add LowerTorso check as another primary option? Could be complex. Stick to Upper/Torso first.
+
+    local headPart = targetChar:FindFirstChild("Head")
+
+    -- 1. Check Primary Torso Part
+    if primaryPart then
+        local isVisible, partPos = isPartVisible(targetPlayer, primaryPart, originOverride)
+        if isVisible then
+            return true, partPos, primaryPartName
+        end
+    end
+
+    -- 2. Check Head Part (Fallback)
+    if headPart then
+        local isVisible, partPos = isPartVisible(targetPlayer, headPart, originOverride)
+        if isVisible then
+            return true, partPos, "Head"
+        end
+    end
+
+    -- 3. If neither is visible
+    return false, nil, nil
+end
+
+
+-- Function to update the target confirmation UI (Optimized check)
+local function updateTargetUI(target)
+    local shouldBeVisible = target and uiEnabled and not isAiming
+    if MainFrame.Visible ~= shouldBeVisible then MainFrame.Visible = shouldBeVisible end
+
+    if shouldBeVisible then
+        local userId = target.UserId
+        local currentImage = PlayerIcon.Image
+        if not currentImage or not string.find(currentImage, tostring(userId)) then
+             task_spawn(function()
+                 local success, content = pcall(Players.GetUserThumbnailAsync, Players, userId, Enum_ThumbnailType.HeadShot, Enum_ThumbnailSize.Size100x100)
+                 if success and content and MainFrame.Visible and currentTargetPlayer == target then PlayerIcon.Image = content
+                 elseif not success then PlayerIcon.Image = "" end
+             end)
+        end
+        if PlayerNameLabel.Text ~= target.DisplayName then PlayerNameLabel.Text = target.DisplayName end
+        local confirmMsg = string_format('Confirm by clicking "%s"', Config.TriggerKey.Name)
+        if ConfirmText.Text ~= confirmMsg then ConfirmText.Text = confirmMsg end
+    end
+end
+
+-- // Mouse Simulation Functions \\ --
+local function performMousePress()
+    isMousePressedByScript = false
+    if typeof(mouse1press) == "function" then
+        local s,e = pcall(mouse1press); if s then isMousePressedByScript = true; return s end
+    end
+    if VirtualUser then -- Fallback
+        local s,e = pcall(function() VirtualUser:Button1Down(Vector2_new()) end); if s then isMousePressedByScript = true; return s end
+    end
+    warn("Flick Aim: No mouse press methods available."); return false
+end
+
+local function performMouseRelease()
+    local released = false
+    if typeof(mouse1release) == "function" then
+        local s,e = pcall(mouse1release); if s then released = true end
+    end
+    if not released and VirtualUser then -- Fallback only if primary failed or missing
+        local s,e = pcall(function() VirtualUser:Button1Up(Vector2_new()) end); if s then released = true end
+    end
+    isMousePressedByScript = false -- Always reset flag
+    if not released then warn("Flick Aim: Failed to release mouse via any method.") end
+    return released
+end
+
+-- Function to perform the INSTANT flick, INTELLIGENT AIM-LOCK, and conditional LMB hold
+local function performFlickAndLock(targetPlayer, targetPartName) -- Now takes targetPartName
+    local targetChar = targetPlayer.Character
+    local targetPart = targetChar and targetChar:FindFirstChild(targetPartName) -- Get the specific part
+    local targetHum = targetChar and targetChar:FindFirstChild("Humanoid")
+
+    -- Stricter validation before starting, including the specific part
+    if not targetHum or targetHum.Health <= 0 or not targetPart then
+        currentTargetPlayer = nil; updateTargetUI(nil); isAiming = false; return
+    end
+    -- Re-verify visibility of the specific part just before flick
+    local initialVisible, targetPartPos = isPartVisible(targetPlayer, targetPart, Camera.CFrame.Position)
+    if not initialVisible or not targetPartPos then
+        currentTargetPlayer = nil; updateTargetUI(nil); isAiming = false; return
+    end
+
+    isAiming = true
+    updateTargetUI(nil) -- Hide UI
+
+    -- 1. Save State
+    savedFOV = Camera.FieldOfView
+    originalMouseBehavior = UserInputService.MouseBehavior
+    originalCameraType = Camera.CameraType
+    originalCameraFocus = Camera.Focus
+
+    -- 2. Set Aiming State
+    Camera.CameraType = Enum_CameraType.Scriptable
+    UserInputService.MouseBehavior = Enum_MouseBehavior.LockCenter
+    task_wait()
+    Camera.FieldOfView = Config.AimFOV
+
+    -- 3. Instant Flick to the target part position
+    local startCFrame = Camera.CFrame
+    local endCFrame = CFrame_lookAt(startCFrame.Position, targetPartPos)
+    Camera.CFrame = endCFrame
+
+    -- 4. Aim-Lock Loop (No immediate mouse press)
+    local lockStartTime = tick()
+    local continueLock = true
+
+    task_spawn(function()
+        while continueLock and isAiming and (tick() - lockStartTime) < Config.AimLockDuration do
+            local frameStartTime = tick() -- For frame time calculation if needed
+
+            -- Re-validate target part and humanoid state frequently
+            targetChar = targetPlayer.Character
+            targetPart = targetChar and targetChar:FindFirstChild(targetPartName) -- Re-find part
+            targetHum = targetChar and targetChar:FindFirstChild("Humanoid")
+
+            if not targetHum or targetHum.Health <= 0 or not targetPart then
+                continueLock = false; break -- Stop if target invalid
+            end
+
+            -- Update Camera CFrame to track the target part
+            local currentCamPos = Camera.CFrame.Position
+            local success, newTargetPos = pcall(function() return targetPart.Position end)
+            if not success or not newTargetPos then
+                continueLock = false; break -- Stop if error getting position
+            end
+
+            local requiredLookVector = (newTargetPos - currentCamPos).Unit
+            local newLookCFrame = CFrame_lookAt(currentCamPos, newTargetPos)
+            Camera.CFrame = newLookCFrame -- Update camera position first
+
+            -- Calculate Aim Stability (Angle between where camera *is* looking and where it *should* be)
+            local actualLookVector = Camera.CFrame.LookVector
+            local dotProduct = actualLookVector:Dot(requiredLookVector)
+            local angle = math_acos(math_clamp(dotProduct, -1.0, 1.0)) -- Clamp dot product for safety
+
+            -- Decide whether to Press/Hold or Release LMB based on stability
+            if angle <= Config.AimStabilityThreshold then
+                -- Aim is stable
+                if not isMousePressedByScript then
+                    performMousePress() -- Press and hold if stable and not already holding
+                end
+            else
+                -- Aim is unstable
+                if isMousePressedByScript then
+                    performMouseRelease() -- Release if unstable and currently holding
+                end
+            end
+
+            -- Wait efficiently until next frame
+            RunService.Heartbeat:Wait()
+        end
+
+        -- Cleanup after loop finishes
+        if isMousePressedByScript then
+            performMouseRelease() -- Ensure mouse is released
+        end
+
+        -- Restore Camera & Cursor
+        task_wait(Config.PostAimLockRestoreDelay)
+        if isAiming then -- Check isAiming flag before restoring (safety)
+             Camera.FieldOfView = savedFOV
+             UserInputService.MouseBehavior = originalMouseBehavior
+             local successRestore = pcall(function() Camera.CameraType = originalCameraType end)
+             if not successRestore then task_wait(); pcall(function() Camera.CameraType = Enum_CameraType.Custom end) end
+             pcall(function() Camera.Focus = originalCameraFocus end)
+             isAiming = false -- Mark aiming as finished
+             lastTargetScanTime = 0 -- Force scan refresh
+        end
+    end)
+end
+
+-- Function to find the best target (Checks Torso/Head, Team)
+local function findBestTarget()
+    local bestTarget = nil
+    local bestTargetPartName = nil
+    local minScreenDistSq = math_huge
+    local viewportSize = Camera.ViewportSize
+    local screenCenterX = viewportSize.X * 0.5
+    local screenCenterY = viewportSize.Y * 0.5
+    local localChar = LocalPlayer.Character
+
+    if not localChar then return nil, nil end
+    local camPos = Camera.CFrame.Position
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            -- Team Check
+            if Config.TeamCheck and LocalPlayer.Team and player.Team and player.Team == LocalPlayer.Team then
+                continue -- Skip teammates if TeamCheck is enabled
+            end
+
+            local targetChar = player.Character
+            if targetChar then
+                 local targetHum = targetChar:FindFirstChild("Humanoid")
+                 if targetHum and targetHum.Health > 0 then
+                     -- Check for visible part (Torso prioritized)
+                     local isVisible, targetPartPos, visiblePartName = getVisibleTargetPart(player, camPos)
+
+                     if isVisible and targetPartPos and visiblePartName then
+                         local screenPoint, onScreen = Camera:WorldToViewportPoint(targetPartPos)
+                         if onScreen then
+                             local dx = screenPoint.X - screenCenterX
+                             local dy = screenPoint.Y - screenCenterY
+                             local distSq = dx*dx + dy*dy
+                             if distSq < minScreenDistSq then
+                                 minScreenDistSq = distSq
+                                 bestTarget = player
+                                 bestTargetPartName = visiblePartName -- Store the name of the visible part
+                             end
+                         end
+                     end
+                 end
+            end
+        end
+    end
+    return bestTarget, bestTargetPartName -- Return player and the part name
+end
+
+-- // Event Connections \\ --
+
+-- Target Scanning Loop
+RunService.Heartbeat:Connect(function(dt)
+    if isAiming then return end
+
+    local currentTime = tick()
+    if currentTime - lastTargetScanTime >= Config.TargetScanInterval then
+        lastTargetScanTime = currentTime
+        local foundTarget, foundPartName = findBestTarget() -- Get both return values
+
+        -- Update target state only if player or target part changes
+        if foundTarget ~= currentTargetPlayer or foundPartName ~= currentTargetPartName then
+            currentTargetPlayer = foundTarget
+            currentTargetPartName = foundPartName -- Store the part name
+            updateTargetUI(currentTargetPlayer)
+        elseif not foundTarget and MainFrame.Visible then
+             updateTargetUI(nil) -- Hide if no target found
+        elseif foundTarget and uiEnabled and not MainFrame.Visible then
+             updateTargetUI(foundTarget) -- Show if target exists but hidden
+        end
+    end
+end)
+
+-- Input Handling for Trigger Key ('E')
+UserInputService.InputBegan:Connect(function(input, gameProcessedEvent)
+    if gameProcessedEvent or isAiming then return end
+
+    if input.KeyCode == Config.TriggerKey then
+        -- Check if a valid target *and* a specific part were found
+        if currentTargetPlayer and currentTargetPartName then
+             local targetChar = currentTargetPlayer.Character
+             local targetHum = targetChar and targetChar:FindFirstChild("Humanoid")
+             -- Minimal check, performFlickAndLock does more thorough validation
+             if targetHum and targetHum.Health > 0 then
+                performFlickAndLock(currentTargetPlayer, currentTargetPartName) -- Pass the part name
+             else
+                currentTargetPlayer = nil; currentTargetPartName = nil; updateTargetUI(nil)
+             end
+        end
+    end
+end)
+
+-- Input Handling for UI Toggle ('H')
+UserInputService.InputBegan:Connect(function(input, gameProcessedEvent)
+    if gameProcessedEvent then return end
+    if input.KeyCode == Config.ToggleUiKey then
+        uiEnabled = not uiEnabled
+        updateTargetUI(currentTargetPlayer)
+    end
+end)
+
+-- // Initialization \\ --
+savedFOV = Camera.FieldOfView
+originalMouseBehavior = UserInputService.MouseBehavior
+originalCameraType = Camera.CameraType
+originalCameraFocus = Camera.Focus
+ConfirmText.Text = string_format('Confirm by clicking "%s"', Config.TriggerKey.Name)
+print("Intelligent Flick & Aim-Lock Assist Loaded (v1.4). Press '"..Config.TriggerKey.Name.."' to engage. Press '"..Config.ToggleUiKey.Name.."' to toggle UI.")
+if typeof(mouse1press) ~= "function" or typeof(mouse1release) ~= "function" then
+    warn("Flick Aim: Primary mouse functions ('mouse1press'/'mouse1release') not detected. Will attempt fallback.")
+end
+
+-- // Cleanup Function \\ --
+local function cleanup()
+    if ConfirmGui then pcall(function() ConfirmGui:Destroy() end) end
+    local wasAiming = isAiming; isAiming = false -- Prevent re-entry/stop loops
+    if wasAiming then
+        pcall(function() Camera.FieldOfView = savedFOV end)
+        pcall(function() UserInputService.MouseBehavior = originalMouseBehavior end)
+        local s = pcall(function() Camera.CameraType = originalCameraType end); if not s then pcall(function() Camera.CameraType = Enum_CameraType.Custom end) end
+        pcall(function() Camera.Focus = originalCameraFocus end)
+    elseif UserInputService.MouseBehavior ~= originalMouseBehavior then pcall(function() UserInputService.MouseBehavior = originalMouseBehavior end)
+    elseif Camera.CameraType ~= originalCameraType then pcall(function() Camera.CameraType = originalCameraType end) end
+    if isMousePressedByScript then performMouseRelease() end -- Ensure release on cleanup
+end
+
+-- // Connect Cleanup to Relevant Events (Robust connection handling) \\ --
+local connections = {} -- Table to store connections
+local function safeDisconnect(conn) if conn then pcall(conn.Disconnect, conn); return nil else return nil end end
+
+local function connectDied(char)
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if humanoid then
+        connections.died = safeDisconnect(connections.died) -- Disconnect previous if any
+        connections.died = humanoid.Died:Connect(function()
+            cleanup()
+            isAiming = false; currentTargetPlayer = nil; currentTargetPartName = nil; updateTargetUI(nil)
+            task_wait(0.1)
+            savedFOV = Camera.FieldOfView; originalMouseBehavior = UserInputService.MouseBehavior
+            originalCameraType = Camera.CameraType; originalCameraFocus = Camera.Focus
+        end)
+    end
+end
+
+if LocalPlayer.Character then connectDied(LocalPlayer.Character) end
+
+connections.charAdded = LocalPlayer.CharacterAdded:Connect(function(char)
+    isAiming = false; currentTargetPlayer = nil; currentTargetPartName = nil
+    task_wait(0.2)
+    savedFOV = Camera.FieldOfView; originalMouseBehavior = UserInputService.MouseBehavior
+    originalCameraType = Camera.CameraType; originalCameraFocus = Camera.Focus
+    updateTargetUI(nil)
+    connectDied(char)
+end)
+
+connections.destroying = script.Destroying:Connect(function()
+    cleanup()
+    for name, conn in pairs(connections) do connections[name] = safeDisconnect(conn) end
+    -- Also disconnect RunService/UserInputService if stored
+end)
