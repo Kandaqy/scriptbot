@@ -1,18 +1,18 @@
 --[[
-    Script: Intelligent Flick & Aim-Lock Assist w/ Persistent Config GUI v1.9
+    Script: Intelligent Flick & Aim-Lock Assist w/ Toggled ESP & Force Cursor Unlock v2.0
     Description: Finds nearest valid, visually present enemy (Torso prioritized, Head fallback),
                  flicks instantly on 'E', then enters an aim-lock phase. During lock, it tracks
                  the target part and only presses/holds LMB when the aim is stable and likely to hit.
                  Releases LMB when aim becomes unstable or lock duration ends. Includes Team Check,
-                 improved spectator filtering. Configuration GUI for ESP toggle, triggered by ';'.
-                 Pressing ';' also manually unlocks the cursor (Improved Reliability). GUIs persist across respawns. Optimized.
+                 improved spectator filtering, Toggled ESP (RightCtrl), and Force Cursor Unlock (;). Optimized.
+                 Improved ESP reliability, cursor management, and UI persistence on respawn.
     Trigger: Press 'E'. Target selected beforehand.
     UI Toggle: Press 'H'.
-    Config GUI Toggle & Cursor Unlock: Press ';'.
     LMB Simulation: Uses mouse1press() and mouse1release(). Falls back to VirtualUser.
     Aim Logic: Prioritizes Torso, checks visibility & visuals, locks onto valid part, shoots when stable.
-    ESP: Optional via GUI (Default: false), highlights players based on team.
-    Cursor Lock: Locks during flick, manually unlocked via ';'.
+    ESP: Toggled via Right Control (Default: false). Includes periodic refresh for reliability.
+    Cursor Lock: Locked temporarily during flick sequence, restored after. Force unlocked via Semicolon (;).
+    UI Persistence: Target UI remains visible after local player death/respawn if a target is still valid.
 ]]
 
 -- // Services \\ --
@@ -24,127 +24,191 @@ local CoreGui = game:GetService("CoreGui")
 local VirtualUser -- Optional fallback service
 
 -- // Optimized Service/Function Access \\ --
-local task_wait = task.wait
-local task_delay = task.delay
-local task_spawn = task.spawn
-local Vector2_new = Vector2.new
-local CFrame_lookAt = CFrame.lookAt
-local Enum_KeyCode = Enum.KeyCode
-local Enum_MouseBehavior = Enum.MouseBehavior
-local Enum_CameraType = Enum.CameraType
-local Enum_ThumbnailType = Enum.ThumbnailType
-local Enum_ThumbnailSize = Enum.ThumbnailSize
-local Enum_RaycastFilterType = Enum.RaycastFilterType
-local Enum_HumanoidStateType = Enum.HumanoidStateType
-local Enum_HighlightDepthMode = Enum.HighlightDepthMode
-local math_huge = math.huge
-local math_acos = math.acos
-local math_clamp = math.clamp
-local math_rad = math.rad
-local ipairs = ipairs
-local pairs = pairs
-local pcall = pcall
-local typeof = typeof
-local string_format = string.format
-local table_insert = table.insert
-local table_move = table.move
-local tick = tick
+local task_wait = task.wait; local task_delay = task.delay; local task_spawn = task.spawn
+local Vector2_new = Vector2.new; local CFrame_lookAt = CFrame.lookAt
+local Enum_KeyCode = Enum.KeyCode; local Enum_MouseBehavior = Enum.MouseBehavior
+local Enum_CameraType = Enum.CameraType; local Enum_ThumbnailType = Enum.ThumbnailType
+local Enum_ThumbnailSize = Enum.ThumbnailSize; local Enum_RaycastFilterType = Enum.RaycastFilterType
+local Enum_HumanoidStateType = Enum.HumanoidStateType; local Enum_HighlightDepthMode = Enum.HighlightDepthMode
+local math_huge = math.huge; local math_acos = math.acos; local math_clamp = math.clamp
+local math_rad = math.rad; local ipairs = ipairs; local pairs = pairs
+local pcall = pcall; local typeof = typeof; local string_format = string.format
+local table_insert = table.insert; local table_move = table.move; local tick = tick
 
--- Attempt to get VirtualUser for fallback click
 pcall(function() VirtualUser = game:GetService("VirtualUser") end)
 
 -- // Local Player & Camera \\ --
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 
--- // Configuration (Defaults) \\ --
+-- // Configuration \\ --
 local Config = {
-    TeamCheck = true,
-    AimFOV = 70,
-    MaxTargetDistance = 1500,
-    TriggerKey = Enum_KeyCode.E,
-    ToggleUiKey = Enum_KeyCode.H,
-    ConfigKey = Enum_KeyCode.Semicolon,
-    TargetScanInterval = 0.1,
-    AimLockDuration = 0.25,
-    AimStabilityThreshold = math_rad(1.5),
-    PostAimLockRestoreDelay = 0.03,
-    MinPartSizeMagnitude = 0.5,
-    MaxPartTransparency = 0.9,
-    ESPEnabled = false,
-    EnemyColor = Color3.fromRGB(255, 60, 60),
-    TeamColor = Color3.fromRGB(60, 255, 60),
-    HighlightFillTransparency = 0.8,
-    HighlightOutlineTransparency = 0,
+    TeamCheck = true, AimFOV = 70, MaxTargetDistance = 1500, TriggerKey = Enum_KeyCode.E,
+    ToggleUiKey = Enum_KeyCode.H, TargetScanInterval = 0.1, AimLockDuration = 0.25,
+    AimStabilityThreshold = math_rad(1.5), PostAimLockRestoreDelay = 0.03,
+    MinPartSizeMagnitude = 0.5, MaxPartTransparency = 0.9,
+    ManualUnlockKey = Enum_KeyCode.Semicolon, ESPEnabled = false,
+    ESPToggleKey = Enum_KeyCode.RightControl, ESPRefreshInterval = 5.0,
+    EnemyColor = Color3.fromRGB(255, 60, 60), TeamColor = Color3.fromRGB(60, 255, 60),
+    HighlightFillTransparency = 0.8, HighlightOutlineTransparency = 0,
 }
 
 -- // State Variables \\ --
 local currentTargetPlayer = nil
 local currentTargetPartName = nil
 local savedFOV = Camera.FieldOfView
-local absoluteOriginalMouseBehavior = UserInputService.MouseBehavior -- Store the very initial state
 local originalCameraType = Camera.CameraType
 local originalCameraFocus = Camera.Focus
 local isAiming = false
 local uiEnabled = true
 local lastTargetScanTime = 0
+local lastESPRefreshTime = 0
 local isMousePressedByScript = false
-local isCursorLockedByScript = false
+-- Removed cursor state tracking, handled directly
 
 -- // ESP Variables \\ --
 local espCache = {}
 local ESPFolder = nil
 
--- // UI Elements (Find or Create - Persistent - Same as v1.8) \\ --
-local ConfirmGui = CoreGui:FindFirstChild("ConfirmTargetGui")
-if not ConfirmGui then ConfirmGui = Instance.new("ScreenGui", CoreGui); ConfirmGui.Name = "ConfirmTargetGui"; ConfirmGui.ResetOnSpawn = false; ConfirmGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling; ConfirmGui.DisplayOrder = 1000 else ConfirmGui.Enabled = true end
-local MainFrame = ConfirmGui:FindFirstChild("MainFrame") or Instance.new("Frame", ConfirmGui)
-if MainFrame.Name ~= "MainFrame" then MainFrame.Name = "MainFrame" end; MainFrame.AnchorPoint = Vector2_new(1, 1); MainFrame.Position = UDim2.new(1, -10, 1, -10); MainFrame.Size = UDim2.new(0, 150, 0, 180); MainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20); MainFrame.BackgroundTransparency = 0.2; MainFrame.BorderSizePixel = 1; MainFrame.BorderColor3 = Color3.fromRGB(190, 190, 190); MainFrame.Visible = false
-local PlayerIcon = MainFrame:FindFirstChild("PlayerIcon") or Instance.new("ImageLabel", MainFrame)
-if PlayerIcon.Name ~= "PlayerIcon" then PlayerIcon.Name = "PlayerIcon" end; PlayerIcon.Size = UDim2.new(0, 100, 0, 100); PlayerIcon.Position = UDim2.new(0.5, 0, 0, 15); PlayerIcon.AnchorPoint = Vector2_new(0.5, 0); PlayerIcon.BackgroundTransparency = 1; PlayerIcon.ScaleType = Enum.ScaleType.Fit; PlayerIcon.Image = ""
-local PlayerNameLabel = MainFrame:FindFirstChild("PlayerNameLabel") or Instance.new("TextLabel", MainFrame)
-if PlayerNameLabel.Name ~= "PlayerNameLabel" then PlayerNameLabel.Name = "PlayerNameLabel" end; PlayerNameLabel.Size = UDim2.new(1, -20, 0, 20); PlayerNameLabel.Position = UDim2.new(0.5, 0, 0, 120); PlayerNameLabel.AnchorPoint = Vector2_new(0.5, 0); PlayerNameLabel.BackgroundTransparency = 1; PlayerNameLabel.TextColor3 = Color3.fromRGB(255, 255, 255); PlayerNameLabel.TextSize = 14; PlayerNameLabel.Font = Enum.Font.SourceSansSemibold; PlayerNameLabel.Text = "No Target"; PlayerNameLabel.TextXAlignment = Enum.TextXAlignment.Center
-local ConfirmText = MainFrame:FindFirstChild("ConfirmText") or Instance.new("TextLabel", MainFrame)
-if ConfirmText.Name ~= "ConfirmText" then ConfirmText.Name = "ConfirmText" end; ConfirmText.Size = UDim2.new(1, -20, 0, 30); ConfirmText.Position = UDim2.new(0.5, 0, 1, -35); ConfirmText.AnchorPoint = Vector2_new(0.5, 0); ConfirmText.BackgroundTransparency = 1; ConfirmText.TextColor3 = Color3.fromRGB(200, 200, 200); ConfirmText.TextSize = 12; ConfirmText.Font = Enum.Font.SourceSans; ConfirmText.TextWrapped = true; ConfirmText.Text = string_format('Confirm by clicking "%s"', Config.TriggerKey.Name); ConfirmText.TextXAlignment = Enum.TextXAlignment.Center
+-- // UI Elements (Ensure persistence) \\ --
+local ConfirmGui = CoreGui:FindFirstChild("ConfirmTargetGui") or Instance.new("ScreenGui", CoreGui)
+if ConfirmGui.Name ~= "ConfirmTargetGui" then ConfirmGui.Name = "ConfirmTargetGui" end
+ConfirmGui.ResetOnSpawn = false -- Keep UI across spawns
+ConfirmGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling; ConfirmGui.DisplayOrder = 1000
 
-local ConfigGui = CoreGui:FindFirstChild("FlickAssistConfigGui")
-if not ConfigGui then ConfigGui = Instance.new("ScreenGui", CoreGui); ConfigGui.Name = "FlickAssistConfigGui"; ConfigGui.ResetOnSpawn = false; ConfigGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling; ConfigGui.DisplayOrder = 1010 else ConfigGui.Enabled = true end
-local MainConfigFrame = ConfigGui:FindFirstChild("MainConfigFrame") or Instance.new("Frame", ConfigGui)
-if MainConfigFrame.Name ~= "MainConfigFrame" then MainConfigFrame.Name = "MainConfigFrame" end; MainConfigFrame.AnchorPoint = Vector2_new(0.5, 0); MainConfigFrame.Position = UDim2.new(0.5, 0, 0.1, 0); MainConfigFrame.Size = UDim2.new(0, 200, 0, 100); MainConfigFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30); MainConfigFrame.BackgroundTransparency = 0.1; MainConfigFrame.BorderSizePixel = 2; MainConfigFrame.BorderColor3 = Color3.fromRGB(100, 100, 100); MainConfigFrame.Visible = false
-local EspLabel = MainConfigFrame:FindFirstChild("EspLabel") or Instance.new("TextLabel", MainConfigFrame)
-if EspLabel.Name ~= "EspLabel" then EspLabel.Name = "EspLabel" end; EspLabel.Size = UDim2.new(0.4, 0, 0.3, 0); EspLabel.Position = UDim2.new(0.05, 0, 0.1, 0); EspLabel.BackgroundTransparency = 1; EspLabel.TextColor3 = Color3.fromRGB(220, 220, 220); EspLabel.Text = "ESP:"; EspLabel.TextSize = 16; EspLabel.Font = Enum.Font.SourceSansSemibold; EspLabel.TextXAlignment = Enum.TextXAlignment.Left
-local EspToggleButton = MainConfigFrame:FindFirstChild("EspToggleButton") or Instance.new("TextButton", MainConfigFrame)
-if EspToggleButton.Name ~= "EspToggleButton" then EspToggleButton.Name = "EspToggleButton" end; EspToggleButton.Size = UDim2.new(0.45, 0, 0.3, 0); EspToggleButton.Position = UDim2.new(0.5, 0, 0.1, 0); EspToggleButton.BackgroundColor3 = Color3.fromRGB(80, 80, 80); EspToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255); EspToggleButton.Text = Config.ESPEnabled and "Enabled" or "Disabled"; EspToggleButton.TextSize = 14; EspToggleButton.Font = Enum.Font.SourceSans
-local CloseLabel = MainConfigFrame:FindFirstChild("CloseLabel") or Instance.new("TextLabel", MainConfigFrame)
-if CloseLabel.Name ~= "CloseLabel" then CloseLabel.Name = "CloseLabel" end; CloseLabel.Size = UDim2.new(0.9, 0, 0.3, 0); CloseLabel.Position = UDim2.new(0.5, 0, 0.6, 0); CloseLabel.AnchorPoint = Vector2_new(0.5, 0); CloseLabel.BackgroundTransparency = 1; CloseLabel.TextColor3 = Color3.fromRGB(180, 180, 180); CloseLabel.Text = string_format("Press %s to Close", Config.ConfigKey.Name); CloseLabel.TextSize = 12; CloseLabel.Font = Enum.Font.SourceSans; CloseLabel.TextXAlignment = Enum.TextXAlignment.Center
+local MainFrame = ConfirmGui:FindFirstChild("MainFrame") or Instance.new("Frame", ConfirmGui)
+if MainFrame.Name ~= "MainFrame" then MainFrame.Name = "MainFrame" end
+MainFrame.AnchorPoint = Vector2_new(1, 1); MainFrame.Position = UDim2.new(1, -10, 1, -10); MainFrame.Size = UDim2.new(0, 150, 0, 180)
+MainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20); MainFrame.BackgroundTransparency = 0.2; MainFrame.BorderSizePixel = 1
+MainFrame.BorderColor3 = Color3.fromRGB(190, 190, 190); MainFrame.Visible = false -- Start hidden
+
+local PlayerIcon = MainFrame:FindFirstChild("PlayerIcon") or Instance.new("ImageLabel", MainFrame)
+if PlayerIcon.Name ~= "PlayerIcon" then PlayerIcon.Name = "PlayerIcon" end
+PlayerIcon.Size = UDim2.new(0, 100, 0, 100); PlayerIcon.Position = UDim2.new(0.5, 0, 0, 15); PlayerIcon.AnchorPoint = Vector2_new(0.5, 0)
+PlayerIcon.BackgroundTransparency = 1; PlayerIcon.ScaleType = Enum.ScaleType.Fit; PlayerIcon.Image = ""
+
+local PlayerNameLabel = MainFrame:FindFirstChild("PlayerNameLabel") or Instance.new("TextLabel", MainFrame)
+if PlayerNameLabel.Name ~= "PlayerNameLabel" then PlayerNameLabel.Name = "PlayerNameLabel" end
+PlayerNameLabel.Size = UDim2.new(1, -20, 0, 20); PlayerNameLabel.Position = UDim2.new(0.5, 0, 0, 120); PlayerNameLabel.AnchorPoint = Vector2_new(0.5, 0)
+PlayerNameLabel.BackgroundTransparency = 1; PlayerNameLabel.TextColor3 = Color3.fromRGB(255, 255, 255); PlayerNameLabel.TextSize = 14
+PlayerNameLabel.Font = Enum.Font.SourceSansSemibold; PlayerNameLabel.Text = "No Target"; PlayerNameLabel.TextXAlignment = Enum.TextXAlignment.Center
+
+local ConfirmText = MainFrame:FindFirstChild("ConfirmText") or Instance.new("TextLabel", MainFrame)
+if ConfirmText.Name ~= "ConfirmText" then ConfirmText.Name = "ConfirmText" end
+ConfirmText.Size = UDim2.new(1, -20, 0, 30); ConfirmText.Position = UDim2.new(0.5, 0, 1, -35); ConfirmText.AnchorPoint = Vector2_new(0.5, 0)
+ConfirmText.BackgroundTransparency = 1; ConfirmText.TextColor3 = Color3.fromRGB(200, 200, 200); ConfirmText.TextSize = 12
+ConfirmText.Font = Enum.Font.SourceSans; ConfirmText.TextWrapped = true; ConfirmText.Text = string_format('Confirm by clicking "%s"', Config.TriggerKey.Name)
+ConfirmText.TextXAlignment = Enum.TextXAlignment.Center
 
 -- // Pre-create RaycastParams for reuse \\ --
-local baseIgnoreList = {Camera, ConfirmGui, ConfigGui}
+local baseIgnoreList = {Camera, ConfirmGui} -- Add ConfirmGui to ignore list
 local rayParams = RaycastParams.new()
 rayParams.FilterType = Enum_RaycastFilterType.Exclude; rayParams.IgnoreWater = true
 
--- // Functions (Visibility, Validity, Target Finding - Same as v1.8) \\ --
-local function isPartRaycastVisible(targetPlayer, targetPart, originOverride) local localChar = LocalPlayer.Character; if not targetPart or not localChar then return false, nil end; local origin = originOverride or Camera.CFrame.Position; local targetPosition = targetPart.Position; local direction = (targetPosition - origin); local distance = direction.Magnitude; if distance < 0.1 or distance > Config.MaxTargetDistance then return false, nil end; local ignoreList = {localChar}; if targetPlayer and targetPlayer.Character then table_insert(ignoreList, targetPlayer.Character) end; table_move(baseIgnoreList, 1, #baseIgnoreList, #ignoreList + 1, ignoreList); rayParams.FilterDescendantsInstances = ignoreList; local raycastResult = Workspace:Raycast(origin, direction.Unit * distance, rayParams); if raycastResult then if targetPlayer and targetPlayer.Character and not raycastResult.Instance:IsDescendantOf(targetPlayer.Character) then return false, nil end; if not targetPlayer or not targetPlayer.Character then return false, nil end; return true, targetPosition else return true, targetPosition end end
-local function isPartVisuallyValid(targetPart, targetChar, targetHum) if not targetPart or not targetChar or not targetHum then return false end; if targetChar.Parent ~= Workspace then return false end; local effectiveTransparency = math_clamp(targetPart.Transparency + targetPart.LocalTransparencyModifier, 0, 1); if effectiveTransparency >= Config.MaxPartTransparency then return false end; if targetPart.Size.Magnitude < Config.MinPartSizeMagnitude then return false end; if targetHum.Sit or targetHum.PlatformStand then return false end; if targetPart:FindFirstAncestorWhichIsA("Accessory") then return false end; return true end
-local function getValidAndVisibleTargetPart(targetPlayer, originOverride) local targetChar = targetPlayer and targetPlayer.Character; if not targetChar then return false, nil, nil end; local targetHum = targetChar:FindFirstChildOfClass("Humanoid"); if not targetHum then return false, nil, nil end; local partCheckOrder = {"UpperTorso", "Torso", "Head"}; for _, partName in ipairs(partCheckOrder) do local targetPart = targetChar:FindFirstChild(partName); if targetPart then local isRaycastVisible, partPos = isPartRaycastVisible(targetPlayer, targetPart, originOverride); if isRaycastVisible and isPartVisuallyValid(targetPart, targetChar, targetHum) then return true, partPos, partName end end end; return false, nil, nil end
-local function findBestTarget() local bestTarget = nil; local bestTargetPartName = nil; local minScreenDistSq = math_huge; local viewportSize = Camera.ViewportSize; local screenCenterX = viewportSize.X * 0.5; local screenCenterY = viewportSize.Y * 0.5; local localChar = LocalPlayer.Character; if not localChar then return nil, nil end; local camPos = Camera.CFrame.Position; for _, player in ipairs(Players:GetPlayers()) do if player ~= LocalPlayer then if Config.TeamCheck and LocalPlayer.Team and player.Team and player.Team == LocalPlayer.Team then continue end; local targetChar = player.Character; if targetChar then local targetHum = targetChar:FindFirstChildOfClass("Humanoid"); if targetHum and targetHum.Health > 0 then local isValidAndVisible, targetPartPos, visiblePartName = getValidAndVisibleTargetPart(player, camPos); if isValidAndVisible and targetPartPos and visiblePartName then local screenPoint, onScreen = Camera:WorldToViewportPoint(targetPartPos); if onScreen then local dx = screenPoint.X - screenCenterX; local dy = screenPoint.Y - screenCenterY; local distSq = dx*dx + dy*dy; if distSq < minScreenDistSq then minScreenDistSq = distSq; bestTarget = player; bestTargetPartName = visiblePartName end end end end end end end; return bestTarget, bestTargetPartName end
+-- // Functions \\ --
 
--- Function to update the target confirmation UI
-local function updateTargetUI(target) if not ConfirmGui or not MainFrame then return end; local shouldBeVisible = target and uiEnabled and not isAiming; if MainFrame.Visible ~= shouldBeVisible then MainFrame.Visible = shouldBeVisible end; if shouldBeVisible then local userId = target.UserId; local currentImage = PlayerIcon.Image; if not currentImage or not string.find(currentImage, tostring(userId)) then task_spawn(function() local s, c = pcall(Players.GetUserThumbnailAsync, Players, userId, Enum_ThumbnailType.HeadShot, Enum_ThumbnailSize.Size100x100); if s and c and MainFrame.Visible and currentTargetPlayer == target then PlayerIcon.Image = c elseif not s then PlayerIcon.Image = "" end end) end; if PlayerNameLabel.Text ~= target.DisplayName then PlayerNameLabel.Text = target.DisplayName end; local confirmMsg = string_format('Confirm by clicking "%s"', Config.TriggerKey.Name); if ConfirmText.Text ~= confirmMsg then ConfirmText.Text = confirmMsg end end end
+local function isPartRaycastVisible(targetPlayer, targetPart, originOverride)
+    local localChar = LocalPlayer.Character; if not targetPart or not localChar then return false, nil end
+    local origin = originOverride or Camera.CFrame.Position; local targetPosition = targetPart.Position
+    local direction = (targetPosition - origin); local distance = direction.Magnitude
+    if distance < 0.1 or distance > Config.MaxTargetDistance then return false, nil end
+    local ignoreList = {localChar}; if targetPlayer and targetPlayer.Character then table_insert(ignoreList, targetPlayer.Character) end
+    table_move(baseIgnoreList, 1, #baseIgnoreList, #ignoreList + 1, ignoreList)
+    rayParams.FilterDescendantsInstances = ignoreList
+    local raycastResult = Workspace:Raycast(origin, direction.Unit * distance, rayParams)
+    if raycastResult then if targetPlayer and targetPlayer.Character and not raycastResult.Instance:IsDescendantOf(targetPlayer.Character) then return false, nil end; if not targetPlayer or not targetPlayer.Character then return false, nil end; return true, targetPosition else return true, targetPosition end
+end
 
--- // ESP Functions (Same as v1.8) \\ --
-local function getHighlightColor(targetPlayer) if not targetPlayer then return Config.EnemyColor end; if Config.TeamCheck and LocalPlayer.Team and targetPlayer.Team then return (targetPlayer.Team == LocalPlayer.Team) and Config.TeamColor or Config.EnemyColor else return Config.EnemyColor end end
+local function isPartVisuallyValid(targetPart, targetChar, targetHum)
+    if not targetPart or not targetChar or not targetHum then return false end; if targetChar.Parent ~= Workspace then return false end
+    local effectiveTransparency = math_clamp(targetPart.Transparency + targetPart.LocalTransparencyModifier, 0, 1); if effectiveTransparency >= Config.MaxPartTransparency then return false end
+    if targetPart.Size.Magnitude < Config.MinPartSizeMagnitude then return false end; if targetHum.Sit or targetHum.PlatformStand then return false end
+    if targetPart:FindFirstAncestorWhichIsA("Accessory") then return false end; return true
+end
+
+local function getValidAndVisibleTargetPart(targetPlayer, originOverride)
+    local targetChar = targetPlayer and targetPlayer.Character; if not targetChar then return false, nil, nil end
+    local targetHum = targetChar:FindFirstChildOfClass("Humanoid"); if not targetHum then return false, nil, nil end
+    local partCheckOrder = {"UpperTorso", "Torso", "Head"}
+    for _, partName in ipairs(partCheckOrder) do
+        local targetPart = targetChar:FindFirstChild(partName)
+        if targetPart then local isRaycastVisible, partPos = isPartRaycastVisible(targetPlayer, targetPart, originOverride); if isRaycastVisible and isPartVisuallyValid(targetPart, targetChar, targetHum) then return true, partPos, partName end end
+    end
+    return false, nil, nil
+end
+
+-- Update Target UI (Handles visibility based on state)
+local function updateTargetUI(target)
+    local shouldBeVisible = target and uiEnabled and not isAiming
+    if MainFrame.Visible ~= shouldBeVisible then MainFrame.Visible = shouldBeVisible end
+    if shouldBeVisible then
+        local userId = target.UserId; local currentImage = PlayerIcon.Image
+        if not currentImage or not string.find(currentImage, tostring(userId)) then
+             task_spawn(function()
+                 local s, c = pcall(Players.GetUserThumbnailAsync, Players, userId, Enum_ThumbnailType.HeadShot, Enum_ThumbnailSize.Size100x100)
+                 -- Check again if still relevant when async returns
+                 if s and c and MainFrame.Visible and currentTargetPlayer == target then PlayerIcon.Image = c elseif not s then PlayerIcon.Image = "" end
+             end)
+        end
+        if PlayerNameLabel.Text ~= target.DisplayName then PlayerNameLabel.Text = target.DisplayName end
+        local confirmMsg = string_format('Confirm by clicking "%s"', Config.TriggerKey.Name)
+        if ConfirmText.Text ~= confirmMsg then ConfirmText.Text = confirmMsg end
+    end
+end
+
+-- // ESP Functions (Improved Reliability) \\ --
+local function getHighlightColor(targetPlayer) if not targetPlayer then return Config.EnemyColor end; if Config.TeamCheck and LocalPlayer and LocalPlayer.Team and targetPlayer.Team then return (targetPlayer.Team == LocalPlayer.Team) and Config.TeamColor or Config.EnemyColor else return Config.EnemyColor end end
 local function cleanupEspConnections(character) if espCache[character] and espCache[character].Connections then for _, conn in ipairs(espCache[character].Connections) do pcall(conn.Disconnect, conn) end; espCache[character].Connections = nil end end
 local function removeESP(character) if character and espCache[character] then cleanupEspConnections(character); if espCache[character].Highlight and espCache[character].Highlight.Parent then pcall(espCache[character].Highlight.Destroy, espCache[character].Highlight) end; espCache[character] = nil end end
-local function addESP(character) if not Config.ESPEnabled or not character or not character.Parent then return end; if character == LocalPlayer.Character or espCache[character] then return end; local humanoid = character:FindFirstChildOfClass("Humanoid"); if not humanoid or humanoid.Health <= 0 then return end; if not ESPFolder or not ESPFolder.Parent then ESPFolder = Workspace.CurrentCamera:FindFirstChild("ESPFolder") or Instance.new("Folder", Workspace.CurrentCamera); if ESPFolder.Name ~= "ESPFolder" then ESPFolder.Name = "ESPFolder" end end; local player = Players:GetPlayerFromCharacter(character); local highlight = Instance.new("Highlight"); highlight.Name = character.Name .. "_ESPHighlight"; highlight.Adornee = character; highlight.DepthMode = Enum_HighlightDepthMode.AlwaysOnTop; highlight.FillTransparency = Config.HighlightFillTransparency; highlight.OutlineTransparency = Config.HighlightOutlineTransparency; local color = getHighlightColor(player); highlight.OutlineColor = color; highlight.FillColor = color; highlight.Parent = ESPFolder; espCache[character] = { Highlight = highlight, Connections = {} }; table_insert(espCache[character].Connections, humanoid.HealthChanged:Connect(function(health) if health <= 0 and espCache[character] then removeESP(character) end end)); table_insert(espCache[character].Connections, character.Destroying:Connect(function() removeESP(character) end)); table_insert(espCache[character].Connections, character:GetPropertyChangedSignal("Parent"):Connect(function() if character.Parent ~= Workspace and espCache[character] then removeESP(character) end end)) end
+local function addESP(character)
+    if not Config.ESPEnabled or not character or not character.Parent or character.Parent ~= Workspace then return end; if character == LocalPlayer.Character or espCache[character] then return end
+    local humanoid = character:FindFirstChildOfClass("Humanoid"); if not humanoid or humanoid.Health <= 0 then return end
+    if not ESPFolder or not ESPFolder.Parent then ESPFolder = Workspace.CurrentCamera:FindFirstChild("ESPFolder") or Instance.new("Folder", Workspace.CurrentCamera); if ESPFolder.Name ~= "ESPFolder" then ESPFolder.Name = "ESPFolder" end end
+    local player = Players:GetPlayerFromCharacter(character); local existingHighlight = ESPFolder:FindFirstChild(character.Name.."_ESPHighlight"); if existingHighlight then pcall(existingHighlight.Destroy, existingHighlight) end
+    local highlight = Instance.new("Highlight"); highlight.Name = character.Name.."_ESPHighlight"; highlight.Adornee = character; highlight.DepthMode = Enum_HighlightDepthMode.AlwaysOnTop
+    highlight.FillTransparency = Config.HighlightFillTransparency; highlight.OutlineTransparency = Config.HighlightOutlineTransparency
+    local color = getHighlightColor(player); highlight.OutlineColor = color; highlight.FillColor = color; highlight.Parent = ESPFolder
+    espCache[character] = { Highlight = highlight, Connections = {} }
+    table_insert(espCache[character].Connections, humanoid.HealthChanged:Connect(function(health) if health <= 0 and espCache[character] then removeESP(character) end end))
+    table_insert(espCache[character].Connections, character.Destroying:Connect(function() removeESP(character) end))
+    table_insert(espCache[character].Connections, character:GetPropertyChangedSignal("Parent"):Connect(function() if character.Parent ~= Workspace and espCache[character] then removeESP(character) end end))
+end
 local function updateESPColor(character) if Config.ESPEnabled and character and espCache[character] and espCache[character].Highlight then local player = Players:GetPlayerFromCharacter(character); local color = getHighlightColor(player); espCache[character].Highlight.OutlineColor = color; espCache[character].Highlight.FillColor = color end end
-local function setupPlayerESP(player) if not Config.ESPEnabled or player == LocalPlayer then return end; local connections = {}; connections.charAdded = player.CharacterAdded:Connect(addESP); connections.charRemoving = player.CharacterRemoving:Connect(removeESP); connections.teamChanged = player:GetPropertyChangedSignal("Team"):Connect(function() if player.Character then updateESPColor(player.Character) end end); if player.Character then addESP(player.Character) end; return connections end
-local function initializeESP() if not Config.ESPEnabled then return end; print("Initializing ESP..."); espCache = {}; ESPFolder = Workspace.CurrentCamera:FindFirstChild("ESPFolder"); if not ESPFolder or not ESPFolder:IsA("Folder") then if ESPFolder then pcall(ESPFolder.Destroy, ESPFolder) end; ESPFolder = Instance.new("Folder", Workspace.CurrentCamera); ESPFolder.Name = "ESPFolder" else ESPFolder:ClearAllChildren() end; task_spawn(function() for _, player in ipairs(Players:GetPlayers()) do setupPlayerESP(player) end end) end
-local function clearESP() print("Clearing ESP..."); for character, data in pairs(espCache) do removeESP(character) end; espCache = {}; if ESPFolder and ESPFolder.Parent then pcall(ESPFolder.Destroy, ESPFolder); ESPFolder = nil end end
+local function setupPlayerESP(player)
+    if not Config.ESPEnabled or player == LocalPlayer then return end; local connections = {}
+    connections.charAdded = player.CharacterAdded:Connect(function(char) task_delay(0.1, function() addESP(char) end) end)
+    connections.charRemoving = player.CharacterRemoving:Connect(removeESP)
+    connections.teamChanged = player:GetPropertyChangedSignal("Team"):Connect(function() if player.Character then updateESPColor(player.Character) end end)
+    if player.Character then task_delay(0.1, function() addESP(player.Character) end) end
+end
+local function initializeESP()
+    if not Config.ESPEnabled then return end; print("Initializing ESP...")
+    espCache = {}; if not ESPFolder or not ESPFolder.Parent then ESPFolder = Workspace.CurrentCamera:FindFirstChild("ESPFolder"); if not ESPFolder or not ESPFolder:IsA("Folder") then if ESPFolder then pcall(ESPFolder.Destroy, ESPFolder) end; ESPFolder = Instance.new("Folder", Workspace.CurrentCamera); ESPFolder.Name = "ESPFolder" else ESPFolder:ClearAllChildren() end else ESPFolder:ClearAllChildren() end
+    task_spawn(function() for _, player in ipairs(Players:GetPlayers()) do setupPlayerESP(player) end end)
+    lastESPRefreshTime = tick()
+end
+local function clearESP()
+    print("Clearing ESP..."); for character, data in pairs(espCache) do removeESP(character) end
+    espCache = {}; if ESPFolder and ESPFolder.Parent then pcall(ESPFolder.Destroy, ESPFolder); ESPFolder = nil end
+end
+local function refreshESP()
+    if not Config.ESPEnabled then return end; for _, player in ipairs(Players:GetPlayers()) do if player ~= LocalPlayer and player.Character and player.Character.Parent == Workspace and not espCache[player.Character] then addESP(player.Character) end end
+    for character, data in pairs(espCache) do if not character or not character.Parent or character.Parent ~= Workspace or not character:FindFirstChildOfClass("Humanoid") or character:FindFirstChildOfClass("Humanoid").Health <= 0 then removeESP(character) end end
+end
 
 -- // Mouse Simulation Functions \\ --
-local function performMousePress() isMousePressedByScript = false; if typeof(mouse1press) == "function" then local s,e = pcall(mouse1press); if s then isMousePressedByScript = true; return s end end; if VirtualUser then local s,e = pcall(function() VirtualUser:Button1Down(Vector2_new()) end); if s then isMousePressedByScript = true; return s end end; warn("Flick Aim: No mouse press methods available."); return false end
-local function performMouseRelease() local released = false; if typeof(mouse1release) == "function" then local s,e = pcall(mouse1release); if s then released = true end end; if not released and VirtualUser then local s,e = pcall(function() VirtualUser:Button1Up(Vector2_new()) end); if s then released = true end end; isMousePressedByScript = false; if not released then warn("Flick Aim: Failed to release mouse via any method.") end; return released end
+local function performMousePress() isMousePressedByScript = false; if typeof(mouse1press) == "function" then local s,e = pcall(mouse1press); if s then isMousePressedByScript = true; return s end end; if VirtualUser then local s,e = pcall(function() VirtualUser:Button1Down(Vector2_new()) end); if s then isMousePressedByScript = true; return s end end; warn("Flick Aim: No mouse press methods."); return false end
+local function performMouseRelease() local released = false; if typeof(mouse1release) == "function" then local s,e = pcall(mouse1release); if s then released = true end end; if not released and VirtualUser then local s,e = pcall(function() VirtualUser:Button1Up(Vector2_new()) end); if s then released = true end end; isMousePressedByScript = false; if not released then warn("Flick Aim: Failed to release mouse.") end; return released end
+
+-- // Force Cursor Unlock Function \\ --
+local function forceUnlockCursor()
+    print("Force Unlock Cursor Requested.")
+    local success = pcall(function()
+        UserInputService.MouseBehavior = Enum_MouseBehavior.Default
+    end)
+    if not success then warn("Flick Aim: Failed to force unlock cursor via pcall.") end
+    -- No need to track lock state anymore
+end
 
 -- Function to perform the INSTANT flick, INTELLIGENT AIM-LOCK, and conditional LMB hold
 local function performFlickAndLock(targetPlayer, targetPartName)
@@ -153,19 +217,29 @@ local function performFlickAndLock(targetPlayer, targetPartName)
     local initialRaycastVisible, targetPartPos = isPartRaycastVisible(targetPlayer, targetPart, Camera.CFrame.Position)
     if not initialRaycastVisible or not targetPartPos or not isPartVisuallyValid(targetPart, targetChar, targetHum) then isAiming = false; return end
 
-    isAiming = true; updateTargetUI(nil)
-    savedFOV = Camera.FieldOfView; originalCameraType = Camera.CameraType; originalCameraFocus = Camera.Focus
-    Camera.CameraType = Enum_CameraType.Scriptable; UserInputService.MouseBehavior = Enum_MouseBehavior.LockCenter; isCursorLockedByScript = true
-    task_wait(); Camera.FieldOfView = Config.AimFOV
-    local startCFrame = Camera.CFrame; local endCFrame = CFrame_lookAt(startCFrame.Position, targetPartPos); Camera.CFrame = endCFrame
-    local lockStartTime = tick(); local continueLock = true
+    isAiming = true
+    updateTargetUI(nil) -- Hide UI during flick/lock
 
+    -- 1. Save State
+    savedFOV = Camera.FieldOfView; originalCameraType = Camera.CameraType; originalCameraFocus = Camera.Focus
+    local flickOriginalMouseBehavior = UserInputService.MouseBehavior -- Store mouse behavior JUST before locking
+
+    -- 2. Set Aiming State & LOCK CURSOR
+    Camera.CameraType = Enum_CameraType.Scriptable
+    local lockSuccess = pcall(function() UserInputService.MouseBehavior = Enum_MouseBehavior.LockCenter end)
+    if not lockSuccess then warn("Flick Aim: Failed to lock mouse behavior."); isAiming = false; return end -- Abort
+    task_wait(); Camera.FieldOfView = Config.AimFOV
+
+    -- 3. Instant Flick
+    local startCFrame = Camera.CFrame; local endCFrame = CFrame_lookAt(startCFrame.Position, targetPartPos); Camera.CFrame = endCFrame
+
+    -- 4. Aim-Lock Loop
+    local lockStartTime = tick(); local continueLock = true
     task_spawn(function()
         while continueLock and isAiming and (tick() - lockStartTime) < Config.AimLockDuration do
             targetChar = targetPlayer.Character; targetPart = targetChar and targetChar:FindFirstChild(targetPartName); targetHum = targetChar and targetChar:FindFirstChildOfClass("Humanoid")
             if not targetHum or targetHum.Health <= 0 or not targetPart or not isPartVisuallyValid(targetPart, targetChar, targetHum) then continueLock = false; break end
-            local currentCamPos = Camera.CFrame.Position; local success, newTargetPos = pcall(function() return targetPart.Position end)
-            if not success or not newTargetPos then continueLock = false; break end
+            local currentCamPos = Camera.CFrame.Position; local success, newTargetPos = pcall(function() return targetPart.Position end); if not success or not newTargetPos then continueLock = false; break end
             local requiredLookVector = (newTargetPos - currentCamPos).Unit; local newLookCFrame = CFrame_lookAt(currentCamPos, newTargetPos); Camera.CFrame = newLookCFrame
             local actualLookVector = Camera.CFrame.LookVector; local dotProduct = actualLookVector:Dot(requiredLookVector); local angle = math_acos(math_clamp(dotProduct, -1.0, 1.0))
             if angle <= Config.AimStabilityThreshold then if not isMousePressedByScript then performMousePress() end else if isMousePressedByScript then performMouseRelease() end end
@@ -173,138 +247,168 @@ local function performFlickAndLock(targetPlayer, targetPartName)
         end
         if isMousePressedByScript then performMouseRelease() end
         task_wait(Config.PostAimLockRestoreDelay)
-        if isAiming then
+        if isAiming then -- Restore only if still considered aiming (prevents race conditions)
              Camera.FieldOfView = savedFOV; local s = pcall(function() Camera.CameraType = originalCameraType end); if not s then task_wait(); pcall(function() Camera.CameraType = Enum_CameraType.Custom end) end
-             pcall(function() Camera.Focus = originalCameraFocus end); isAiming = false
-             -- Cursor remains locked until ';' is pressed by the user
+             pcall(function() Camera.Focus = originalCameraFocus end)
+             -- Restore original mouse behavior recorded just before the flick
+             local restoreMouseSuccess = pcall(function() UserInputService.MouseBehavior = flickOriginalMouseBehavior end)
+             if not restoreMouseSuccess then
+                 warn("Flick Aim: Failed to restore mouse behavior after flick. Forcing Default.")
+                 pcall(function() UserInputService.MouseBehavior = Enum_MouseBehavior.Default end)
+             end
+             isAiming = false -- Mark flick sequence as fully finished AFTER restoration
         end
     end)
 end
 
+-- Function to find the best target (Checks Vis + Validity, Torso/Head, Team)
+local function findBestTarget()
+    local bestTarget = nil; local bestTargetPartName = nil; local minScreenDistSq = math_huge
+    local viewportSize = Camera.ViewportSize; local screenCenterX = viewportSize.X * 0.5; local screenCenterY = viewportSize.Y * 0.5
+    local localChar = LocalPlayer.Character; if not localChar and Players.LocalPlayer then localChar = Players.LocalPlayer.Character end
+    local camPos = Camera.CFrame.Position
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            if Config.TeamCheck and LocalPlayer and LocalPlayer.Team and player.Team and player.Team == LocalPlayer.Team then continue end
+            local targetChar = player.Character
+            if targetChar then
+                 local targetHum = targetChar:FindFirstChildOfClass("Humanoid")
+                 if targetHum and targetHum.Health > 0 then
+                     local isValidAndVisible, targetPartPos, visiblePartName = getValidAndVisibleTargetPart(player, camPos)
+                     if isValidAndVisible and targetPartPos and visiblePartName then
+                         local screenPoint, onScreen = Camera:WorldToViewportPoint(targetPartPos)
+                         if onScreen then local dx = screenPoint.X - screenCenterX; local dy = screenPoint.Y - screenCenterY; local distSq = dx*dx + dy*dy; if distSq < minScreenDistSq then minScreenDistSq = distSq; bestTarget = player; bestTargetPartName = visiblePartName end end
+                     end
+                 end
+            end
+        end
+    end
+    return bestTarget, bestTargetPartName
+end
+
 -- // Event Connections \\ --
 
--- Target Scanning (Heartbeat)
+-- Main Loop (Target Scan + ESP Refresh)
 RunService.Heartbeat:Connect(function(dt)
-    if isAiming then return end
     local currentTime = tick()
     if currentTime - lastTargetScanTime >= Config.TargetScanInterval then
-        lastTargetScanTime = currentTime
-        local foundTarget, foundPartName = findBestTarget()
-        if foundTarget ~= currentTargetPlayer or foundPartName ~= currentTargetPartName then
-            currentTargetPlayer = foundTarget; currentTargetPartName = foundPartName
-            updateTargetUI(currentTargetPlayer)
-        elseif not foundTarget and MainFrame and MainFrame.Visible then updateTargetUI(nil)
-        elseif foundTarget and uiEnabled and MainFrame and not MainFrame.Visible then updateTargetUI(foundTarget)
-        end
+        lastTargetScanTime = currentTime; local foundTarget, foundPartName = findBestTarget()
+        if foundTarget ~= currentTargetPlayer or foundPartName ~= currentTargetPartName then currentTargetPlayer = foundTarget; currentTargetPartName = foundPartName; updateTargetUI(currentTargetPlayer)
+        elseif not foundTarget and MainFrame.Visible then updateTargetUI(nil)
+        elseif foundTarget and uiEnabled and not MainFrame.Visible then updateTargetUI(foundTarget) end
     end
+    if Config.ESPEnabled and currentTime - lastESPRefreshTime >= Config.ESPRefreshInterval then lastESPRefreshTime = currentTime; refreshESP() end
 end)
 
--- Input Handling for Trigger Key ('E')
-UserInputService.InputBegan:Connect(function(input, gameProcessedEvent)
-    if gameProcessedEvent or isAiming or (MainConfigFrame and MainConfigFrame.Visible) then return end
-    if input.KeyCode == Config.TriggerKey then
-        if currentTargetPlayer and currentTargetPartName then
-             local targetChar = currentTargetPlayer.Character; local targetHum = targetChar and targetChar:FindFirstChild("Humanoid")
-             if targetHum and targetHum.Health > 0 then performFlickAndLock(currentTargetPlayer, currentTargetPartName)
-             else currentTargetPlayer = nil; currentTargetPartName = nil; updateTargetUI(nil) end
-        end
-    end
-end)
-
--- Input Handling for Aim Assist UI Toggle ('H')
+-- Input Handling (Trigger, UI Toggle, Cursor Unlock, ESP Toggle)
 UserInputService.InputBegan:Connect(function(input, gameProcessedEvent)
     if gameProcessedEvent then return end
-    if input.KeyCode == Config.ToggleUiKey then uiEnabled = not uiEnabled; updateTargetUI(currentTargetPlayer) end
-end)
-
--- *** MODIFIED: Input Handling for Config GUI Toggle & Cursor Unlock (';') ***
-UserInputService.InputBegan:Connect(function(input, gameProcessedEvent)
-    if input.KeyCode == Config.ConfigKey then
-        -- Force Unlock Cursor with extra steps for reliability
-        local successUnlock = pcall(function()
-            -- Step 1: Set to Default
-            UserInputService.MouseBehavior = Enum_MouseBehavior.Default
-            -- Step 2: Wait briefly
-            task_wait(0.01) -- Use a very small delay
-            -- Step 3: Set to the absolute original behavior (which is likely Default anyway, but robust)
-            UserInputService.MouseBehavior = absoluteOriginalMouseBehavior
-        end)
-
-        if not successUnlock then
-            warn("Flick Assist: Failed to change MouseBehavior on manual unlock.")
-        else
-             -- print("Cursor manually unlocked via ';'.") -- Debug
-        end
-        isCursorLockedByScript = false -- Always mark as unlocked after manual attempt
-
-        -- Toggle Config GUI Visibility
-        if MainConfigFrame then MainConfigFrame.Visible = not MainConfigFrame.Visible end
-    end
-end)
-
--- Config GUI Button Connection
-EspToggleButton.MouseButton1Click:Connect(function()
-    Config.ESPEnabled = not Config.ESPEnabled
-    EspToggleButton.Text = Config.ESPEnabled and "Enabled" or "Disabled"
-    if Config.ESPEnabled then initializeESP() else clearESP() end
+    local key = input.KeyCode
+    if key == Config.TriggerKey and not isAiming then
+        if currentTargetPlayer and currentTargetPartName then local targetChar = currentTargetPlayer.Character; local targetHum = targetChar and targetChar:FindFirstChildOfClass("Humanoid"); if targetHum and targetHum.Health > 0 then performFlickAndLock(currentTargetPlayer, currentTargetPartName) else currentTargetPlayer = nil; currentTargetPartName = nil; updateTargetUI(nil) end end
+    elseif key == Config.ToggleUiKey then uiEnabled = not uiEnabled; updateTargetUI(currentTargetPlayer)
+    elseif key == Config.ManualUnlockKey then forceUnlockCursor()
+    elseif key == Config.ESPToggleKey then Config.ESPEnabled = not Config.ESPEnabled; print("ESP Toggled:", Config.ESPEnabled and "ON" or "OFF"); if Config.ESPEnabled then initializeESP() else clearESP() end; lastESPRefreshTime = tick() end
 end)
 
 -- // Initialization \\ --
-savedFOV = Camera.FieldOfView; absoluteOriginalMouseBehavior = UserInputService.MouseBehavior
+savedFOV = Camera.FieldOfView; -- originalMouseBehavior removed
 originalCameraType = Camera.CameraType; originalCameraFocus = Camera.Focus
-if ConfirmText then ConfirmText.Text = string_format('Confirm by clicking "%s"', Config.TriggerKey.Name) end
-if CloseLabel then CloseLabel.Text = string_format("Press %s to Close", Config.ConfigKey.Name) end
-
+ConfirmText.Text = string_format('Confirm by clicking "%s"', Config.TriggerKey.Name)
 if Config.ESPEnabled then initializeESP() end
-print("Intelligent Flick & Aim-Lock Assist Loaded (v1.9 w/ Persistent GUI). Press '"..Config.TriggerKey.Name.."' to engage. Press '"..Config.ToggleUiKey.Name.."' for Target UI. Press '"..Config.ConfigKey.Name.."' for Config/Unlock.")
-if typeof(mouse1press) ~= "function" or typeof(mouse1release) ~= "function" then warn("Flick Aim: Primary mouse functions not detected. Will attempt fallback.") end
+print("Intelligent Flick & Aim-Lock Assist Loaded (v2.0). E:Flick | H:Toggle UI | ;:Force Unlock Cursor | RCtrl:Toggle ESP")
+if typeof(mouse1press) ~= "function" or typeof(mouse1release) ~= "function" then warn("Flick Aim: Primary mouse functions not detected. Fallback may be used.") end
 
--- // Cleanup Function \\ --
-local function cleanup(destroyGuis)
-    print("Cleaning up Aim Assist...")
-    if destroyGuis then print("... destroying GUIs.")
-        if ConfirmGui then pcall(ConfirmGui.Destroy, ConfirmGui); ConfirmGui = nil end
-        if ConfigGui then pcall(ConfigGui.Destroy, ConfigGui); ConfigGui = nil end
+-- // Cleanup Function (Modified) \\ --
+local function cleanup(isFullCleanup) -- Added isFullCleanup parameter
+    print("Cleaning up Aim Assist & ESP...")
+    if isFullCleanup and ConfirmGui then -- Only destroy UI on full cleanup
+        pcall(function() ConfirmGui:Destroy() end)
+        ConfirmGui = nil -- Nil out reference
     end
+
     local wasAiming = isAiming; isAiming = false
-    if wasAiming then pcall(function() Camera.FieldOfView = savedFOV end); local s = pcall(function() Camera.CameraType = originalCameraType end); if not s then pcall(function() Camera.CameraType = Enum_CameraType.Custom end) end; pcall(function() Camera.Focus = originalCameraFocus end)
-    elseif Camera.CameraType ~= originalCameraType then pcall(function() Camera.CameraType = originalCameraType end) end
+    if wasAiming then -- Restore camera state if aiming during cleanup
+        pcall(function() Camera.FieldOfView = savedFOV end)
+        local s = pcall(function() Camera.CameraType = originalCameraType end); if not s then pcall(function() Camera.CameraType = Enum_CameraType.Custom end) end
+        pcall(function() Camera.Focus = originalCameraFocus end)
+    elseif Camera.CameraType ~= originalCameraType then pcall(function() Camera.CameraType = originalCameraType end) end -- Restore if changed outside aiming
+
     if isMousePressedByScript then performMouseRelease() end
-    -- Use pcall for setting mouse behavior during cleanup as service might be unavailable on game close
-    pcall(function() if UserInputService.MouseBehavior ~= absoluteOriginalMouseBehavior then UserInputService.MouseBehavior = absoluteOriginalMouseBehavior end end)
-    isCursorLockedByScript = false
-    if destroyGuis then clearESP()
-    elseif Config.ESPEnabled then print("Clearing ESP cache/highlights..."); for char, data in pairs(espCache) do removeESP(char) end; espCache = {}; if ESPFolder then ESPFolder:ClearAllChildren() end end
+
+    -- Force unlock cursor to Default if it's currently locked (regardless of who locked it)
+    if UserInputService.MouseBehavior == Enum_MouseBehavior.LockCenter then
+        print("Cleanup: Forcing cursor unlock to Default.")
+        pcall(function() UserInputService.MouseBehavior = Enum_MouseBehavior.Default end)
+    end
+
+    clearESP() -- Always clear ESP visuals on any cleanup
 end
 
 -- // Connect Cleanup to Relevant Events (Robust connection handling) \\ --
 local connections = {}
 local function safeDisconnect(conn) if conn then pcall(conn.Disconnect, conn); return nil else return nil end end
 
-local function connectDied(char)
-    local humanoid = char:FindFirstChildOfClass("Humanoid")
-    if humanoid then connections.died = safeDisconnect(connections.died); connections.died = humanoid.Died:Connect(function() if Config.ESPEnabled then removeESP(char) end; if char == currentTargetPlayer and currentTargetPlayer.Character then currentTargetPlayer = nil; currentTargetPartName = nil; updateTargetUI(nil) end end) end
+local function connectDied(char) -- Handles remote player death for ESP
+    local humanoid = char:FindFirstChildOfClass("Humanoid"); if not humanoid then return end
+    local connKey = "died_"..char:GetFullName(); connections[connKey] = safeDisconnect(connections[connKey])
+    connections[connKey] = humanoid.Died:Connect(function() if Config.ESPEnabled then removeESP(char) end; connections[connKey] = safeDisconnect(connections[connKey]) end)
 end
 
-local function handleLocalPlayerRespawn()
-     cleanup(false) -- Don't destroy GUIs on respawn
-     task_wait(0.2); savedFOV = Camera.FieldOfView; absoluteOriginalMouseBehavior = UserInputService.MouseBehavior; originalCameraType = Camera.CameraType; originalCameraFocus = Camera.Focus
-     isAiming = false; currentTargetPlayer = nil; currentTargetPartName = nil
-     if ConfirmGui then updateTargetUI(nil) end; if MainConfigFrame then MainConfigFrame.Visible = false end
-     isCursorLockedByScript = false; if Config.ESPEnabled then initializeESP() end
+-- Handle Local Player State Changes (Death/Respawn/Char Remove) - MODIFIED
+local function handleLocalPlayerRespawnReset()
+     print("Local Player Respawn/Reset Detected.")
+     local wasAimingCache = isAiming -- Cache aiming state
+
+     -- Manually reset critical states WITHOUT full cleanup
+     isAiming = false -- Stop any potential aiming loops
+     if isMousePressedByScript then performMouseRelease() end -- Release mouse if held
+
+     -- If died mid-flick, restore camera state
+     if wasAimingCache then
+         print("Resetting camera state after potential mid-flick death.")
+         pcall(function() Camera.FieldOfView = savedFOV end)
+         local s = pcall(function() Camera.CameraType = originalCameraType end); if not s then pcall(function() Camera.CameraType = Enum_CameraType.Custom end) end
+         pcall(function() Camera.Focus = originalCameraFocus end)
+         -- Force unlock cursor if it was likely locked by the flick
+         if UserInputService.MouseBehavior == Enum_MouseBehavior.LockCenter then forceUnlockCursor() end
+     end
+
+     -- Re-read initial camera/focus state AFTER potential restoration/respawn
+     task_wait(0.2)
+     savedFOV = Camera.FieldOfView
+     originalCameraType = Camera.CameraType
+     originalCameraFocus = Camera.Focus
+
+     -- DONT clear currentTargetPlayer/PartName - let scan update it naturally
+     -- DONT hide UI - updateTargetUI will handle it based on currentTargetPlayer
+
+     if Config.ESPEnabled then
+         clearESP() -- Clear existing ESP fully first
+         initializeESP() -- Re-initialize ESP to catch all players
+     end
+
+     updateTargetUI(currentTargetPlayer) -- Refresh UI state after reset
 end
 
-local localPlayer = Players.LocalPlayer
-if localPlayer then
-    if localPlayer.Character then connectDied(localPlayer.Character) end
-    connections.localCharAdded = localPlayer.CharacterAdded:Connect(function(char) handleLocalPlayerRespawn(); connectDied(char); if Config.ESPEnabled then task_spawn(initializeESP) end end)
-    connections.localPlayerDied = localPlayer.CharacterRemoving:Connect(handleLocalPlayerRespawn)
-end
+if LocalPlayer then
+    if LocalPlayer.Character then connectDied(LocalPlayer.Character) end
+    -- Use CharacterAdded for respawn logic
+    connections.localCharAdded = LocalPlayer.CharacterAdded:Connect(function(char)
+        handleLocalPlayerRespawnReset() -- Use the modified reset function
+        connectDied(char)
+    end)
+    -- CharacterRemoving is less reliable for respawn, stick to CharacterAdded
+    -- connections.localPlayerRemoving = LocalPlayer.CharacterRemoving:Connect(handleLocalPlayerRespawnReset)
+else warn("Flick Aim: LocalPlayer not found.") end
 
 connections.playerAdded = Players.PlayerAdded:Connect(setupPlayerESP)
-connections.playerRemoving = Players.PlayerRemoving:Connect(function(player) if player.Character then removeESP(player.Character) end end)
-connections.localTeamChanged = LocalPlayer:GetPropertyChangedSignal("Team"):Connect(function() if Config.ESPEnabled then for char, data in pairs(espCache) do updateESPColor(char) end end end)
+connections.playerRemoving = Players.PlayerRemoving:Connect(function(player) if player.Character then local char = player.Character; removeESP(char); local connKey = "died_"..char:GetFullName(); connections[connKey] = safeDisconnect(connections[connKey]) end end)
+connections.localTeamChanged = LocalPlayer and LocalPlayer:GetPropertyChangedSignal("Team"):Connect(function() if Config.ESPEnabled then for char, data in pairs(espCache) do updateESPColor(char) end end end) or nil
 
+-- Connect full cleanup only to script destruction
 connections.destroying = script.Destroying:Connect(function()
-    cleanup(true); for name, conn in pairs(connections) do connections[name] = safeDisconnect(conn) end
+    cleanup(true) -- Pass true for full cleanup including UI
+    for name, conn in pairs(connections) do connections[name] = safeDisconnect(conn) end
+    connections = nil
 end)
